@@ -1,0 +1,207 @@
+= Testing persistence with Arquillian on TomEE
+Robert Panzer <rpanzer@tomitribe.com>
+:source-highlighter: coderay
+:icons: font
+:url-javaee: http://www.oracle.com/technetwork/java/javaee/overview/index.html
+:url-jpa: http://www.oracle.com/technetwork/java/javaee/tech/persistence-jsp-140049.html
+:url-arquillian: http://arquillian.org
+:url-arqpersistence: https://github.com/arquillian/arquillian-extension-persistence
+:url-arqpersistence-docs: https://docs.jboss.org/author/display/ARQ/Persistence
+:url-tomee: http://openejb.apache.org
+:url-maven: http://maven.apache.org
+:url-junit: http://junit.org
+:url-dbunit: http://dbunit.sourceforge.net/
+:url-hsql: http://hsqldb.org
+
+Testing enterprise applications that use persistence can be a hassle:
+
+- A test database has to be configured.
+- The database has to be seeded before the test.
+- After the test the state of the database has to compared with the expected result.
+
+This post shows how to write a test for a {url-javaee}[Java EE] application that uses the {url-jpa}[Java Persistence API] using these technologies:
+
+- {url-arquillian}[Arquillian] is a testing platform that allows among other things testing Java EE applications in a Java EE application server. 
+- The {url-arqpersistence}[Arquillian Persistence Extension] is an extension to Arquillian that takes over seeding the database, matching the state of the database against the expected results and much more.
+- {url-tomee}[Apache TomEE] is a super lightweight open source Java EE application server that is certified for the Java EE Web Profile.
+
+This article assumes that you have a basic knowledge of JavaEE including JPA and Arquillian.
+
+First let's take a look at the test itself, how it becomes slimmer with the Arquillian Persistence Extension.
+Afterwards we will explore how to run these tests with the Arquillian Persistence Extension on TomEE.
+
+== Testing persistent applications
+
+In this article we use a very simple entity `MyEntity` that only has two fields, `key` and `value`.
+That means our entity is a simple key value map:
+
+.src/main/java/org/superbiz/arqpersistence/MyEntity.java
+[source,java]
+---- 
+include::src/main/java/org/superbiz/arqpersistence/MyEntity.java[tags="doc"]
+----
+
+Without the Arquillian Persistence Extension an Arquillian test that creates and updates one entity could look similar to the code below, which looks quite intimidating.
+For the sake of brevity the invocation of any real business logic is skipped and replaced by direct calls to the `EntityManager`.
+
+.src/test/java/org/superbiz/arqpersistence/OldSchoolTest.java
+[source,java]
+----
+include::src/test/java/org/superbiz/arqpersistence/OldSchoolTest.java[tags="doc"]
+----
+<1> The method `deploy()` prepares the test deployment.
+    There is not much to add besides the entity class and a `persistence.xml`.
+    We chose an own `test-persistence.xml` so that we can tell the `EntityManager` to create the schema itself.
+<2> We get the `EntityManager` injected into the test case.
+<3> We also need a `UserTransaction` to prepare and check the database in separate transactions.
+<4> The test `shouldCreateEntity()` does nothing but creating an entity.
+    Before the test it has to be ensured that the database is clean.
+    Afterwards it has to be checked that this and only this entity is in the database.
+<5> The test `shouldUpdateEntity()` updates one entity when two entities are in the database.
+    Before the test the two entities have to be created in the database.
+    After the test the result has to be verified that still two entities exist and one of them has the new value.
+
+Noticed how much code is spent on preparation of the database and testing of the results?
+And in particular testing the results becomes more and more complex the more entities are used or you decide to skip some checks.
+    
+Now let's see how the test looks like when we use the Arquillian Persistence Extension.
+In contrast to the first example it will do seeding of the database, verification of the results and transaction handling automatically for us!
+
+.src/test/java/org/superbiz/arqpersistence/PersistenceTest.java
+[source,java]
+----
+include::src/test/java/org/superbiz/arqpersistence/PersistenceTest.java[tags="doc"]
+----
+<1> The method `deploy()` prepares the test deployment just the same way as the initial test.
+<2> We also use the `EntityManager` in our test, so we get it injected from Arquillian.
+    In contrast to the first test we don't need a UserTransaction.
+    The Arquillian Persistence Extension automatically executes every test in its own transaction.
+<3> This is one of the traps you can step in when using OpenJPA, as is included in TomEE.
+    OpenJPA does not create the schema until the EntityManager is initialized.
+    As the Arquillian Persistence Extension does not use JPA to seed and check the database, we have to ensure that the schema is created before the first "real" persistence test.
+    One way to make OpenJPA create the schema is to invoke the method `EntityManager.getMetamodel()`.
+    The `@InSequence` annotation ensures that this test method is invoked first.
+    Notice that you don't need this if you use Hibernate as your JPA provider.
+<4> In our first test that creates an entity we don't seed the database, Arquillian Persistence Extension will automatically clean it for us before every test.
+    We describe the expected outcome of the test in the file `datasets/after_create.xml` referenced by the annotation `@ShouldMatchDataSet`.
+    Arquillian Persistence Extension will automatically compare the database contents with this file.
+    We will show the structure of a dataset below.
+    The annotation `@InSequence(2)` will guarantee that this method is executed after `initEntityManager()`.
+<5> In our update test we also define the initial dataset defined in the file `datasets/before_update.xml` that is referenced by the annotation `@UsingDataSet`.
+
+The datasets mentioned above can be anything that is accepted by {url-dbunit}[DBUnit] like XML or JSON.
+
+The initial dataset for the update test could look like this:
+
+.datasets/before_update.xml
+[source,xml]
+----
+include::src/test/resources/datasets/before_update.xml[]
+----
+
+The expected dataset looks like this:
+
+.datasets/after_update.xml
+[source,xml]
+----
+include::src/test/resources/datasets/after_update.xml[]
+----
+
+Did you notice how much code just disappeared?
+
+The remaining problems we have are executing the tests on the application server and accessing a database from the tests.
+But first we have to build the project.
+
+== Setting up the project
+
+We use {url-maven}[Maven], so this section explains how to setup the Maven build.
+
+First we add the dependency on the JavaEE API:
+
+[source,xml]
+----
+include::pom.xml[tags="javaeeapi,startdeps,enddeps"]
+----
+
+Next we have to define the dependencies on our testing framework and on Arquillian.
+We add the awesome new arquillian-universe bom to the dependency management section.
+This bom ties together the versions of the Arquillian core as well as all standard extensions, including the Persistence Extension.
+As we use {url-junit}[JUnit] as our test framework we add a dependency on `junit` and on the integration for Arquillian in JUnit, `arquillian-junit-container`.
+
+[source,xml]
+----
+include::pom.xml[tags="testframeworkdeps,startdeps,enddeps"]
+----
+
+To use the Arquillian Persistence extension and make that the tests are executed in a transaction we add the dependencies on the persistence and transaction extension.
+Note that we don't define any versions, as these are already defined by the Arquillian universe bom.
+
+[source,xml]
+----
+include::pom.xml[tags="persistence,startdeps,enddeps"]
+----
+<1> The dependency on `arquillian-persistence` gives access to the database seeding and result matching via the annotations `@UsingDataSet` and `@ShouldMatchDataSet`.
+<2> The dependency on `arquillian-transaction-jta` allows to execute the tests within a JTA transaction so that the test does not have to begin and commit transaction itself.
+<3> The exclusion of the transitive dependency on `arquillian-transaction-jta` is one specific point to keep in mind.
+    The TomEE Arquillian adapter brings an own implementation of the service brought by this artifact.
+    Unfortunately it can be very hard to diagnose this problem.
+
+Finally we add the dependency on the remote TomEE container adapter.
+What is really awesome about the TomEE container adapter is that you have a remote container, that is started and stopped by Arquillian, but you don't need to install it anywhere.
+The container adapter will automatically download the zip, extract it and run the container from there.
+
+[source,xml]
+----
+include::pom.xml[tags="tomee,startdeps,enddeps"]
+----
+
+== Configuring and executing the test
+
+There are essentially three things that you have to configure:
+
+1. We have to add a `persistence.xml` for the test that makes OpenJPA create the database schema, assuming that the default version will not.
+2. Then we have to configure the remote TomEE instance so that it can provide the DataSource for the EntityManager as well as for the Arquillian Persistence Extension.
+   As we want to have our tests as lightweight as possible we use an {url-hsql}[HSQL] in memory datasource, so that there is nothing to install or anything that survives two consecutive tests.
+   Fortunately TomEE already contains the JDBC driver for it in its `lib/` directory.
+3. Finally we have to tell the Arquillian Persistence Extension how to get a connection to the database for seeding and checking.
+
+The `test-persistence.xml` simply looks like this:
+
+.src/test/resources/test-persistence.xml
+[source,xml]
+----
+include::src/test/resources/test-persistence.xml[]
+----
+<1> This is the name of the `javax.sql.DataSource` the EntityManager wants to use.
+    In TomEE this is simply the name of the resource.
+<2> Via the property `openjpa.jdbc.SynchronizeMappings` with the value `buildSchema(ForeignKeys=true)` we make OpenJPA create the schema at initialization time including creation of foreign key constraints.
+<3> Via this property we activate logging for OpenJPA so that we can see what it does during the test.
+
+The `arquillian.xml` configures the TomEE instance as well as the Arquillian Persistence Extension:
+
+.src/test/resources/arquillian.xml
+[source,xml]
+----
+include::src/test/resources/arquillian.xml[]
+----
+<1> These properties configure the HSQL datasource under the name `fooDS`.
+    Notice that the lookup name for this resource for the Arquillian Persistence Extension will be `openejb:Resource/fooDS`.
+<2> In case you want to debug the application in the server during a test the `debug` property is there to help.
+    It will make the TomEE Arquillian container adapter start the server process waiting for a Debugger on port 5005.
+<3> The property `defaultDataSource` configures the lookup name of the DataSource that the Arquillian Persistence Extension uses to seed and check the database.
+    This has to be configured appropriatly.
+    The extension supports a whole bunch of other properties that have reasonable defaults.
+    You can find a description of all properties at the {url-arqpersistence-docs}[Arquillian Persistence Extension documentation].
+
+Finally you can simply run the test simply via `mvn clean test`.
+
+== Conclusion
+
+Arquillian, Arquillian Persistence Extension and TomEE are a perfect match for testing applications that use persistence.
+You get a test environment including a database without any prior configuration of the system.
+
+Nevertheless there are some points you have to pay attention to when running on TomEE and OpenJPA, which are:
+
+1. Exclude the transitive dependency `org.jboss.arquillian.extension:arquillian-transaction-jta`.
+2. Initialize the EntityManager before the Arquillian Persistence Extension seeds the database the first time.
+3. Configure the correct lookup name for the Arquillian Persistence Extension via the `defaultDataSource` property of the `persistence` extension configuration section.

@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<arquillian xmlns="http://jboss.org/schema/arquillian"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="
+              http://jboss.org/schema/arquillian
+              http://jboss.org/schema/arquillian/arquillian_1_0.xsd">
+
+    <container qualifier="server" default="true">
+        <configuration>
+            <property name="httpsPort">-1</property>
+            <property name="httpPort">-1</property>
+            <property name="stopPort">-1</property>
+            <property name="ajpPort">-1</property>
+
+            <property name="simpleLog">true</property>
+            <property name="cleanOnStartUp">true</property>
+
+            <property name="dir">target/server</property>
+            <property name="appWorkingDir">target/arquillian</property>
+            <property name="properties">                                     <!--1-->
+                fooDS = new://Resource?type=DataSource
+                fooDS.JdbcDriver = org.hsqldb.jdbcDriver
+                fooDS.JdbcUrl = jdbc:hsqldb:mem:arquillian
+                fooDS.UserName = sa
+                fooDS.Password =
+                fooDS.JtaManaged = true
+                fooDS.LogSql = true
+            </property>
+            <property name="debug">false</property>                          <!--2-->
+        </configuration>
+    </container>
+
+    <extension qualifier="persistence">
+        <property name="defaultDataSource">openejb:Resource/fooDS</property> <!--3-->
+    </extension>
+</arquillian>
